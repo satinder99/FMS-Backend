@@ -26,6 +26,7 @@ function requestMetaFrom(req) {
 
 async function signUpController(req, res, next) {
   try {
+    console.log("sign up req: ",req.body)
     const { orgId, username, email, phone, password } = req.body;
     const { user, accessToken, refreshToken } = await authService.signUp(
       { orgId, username, email, phone, password },

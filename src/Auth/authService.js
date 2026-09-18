@@ -6,6 +6,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const pool = require('../config/dbConfig');
 const { AppError } = require('../Errors/errors');
+require('dotenv').config();
 
 const SALT_ROUNDS = 12;
 const MAX_FAILED_ATTEMPTS = 5;
