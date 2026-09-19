@@ -4,7 +4,7 @@
 const express = require('express');
 const cookieParser = require('cookie-parser'); // needed to read the refresh-token cookie
 const authRoutes = require('./Auth/authRoutes');
-const { requireAuth } = require('./Auth/authMiddleware');
+const { requireAuth } = require('./Middlewares/authMiddleware');
 const errorHandler = require('./Errors/errorHandles');
 
 const app = express();

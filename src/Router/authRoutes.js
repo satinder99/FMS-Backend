@@ -8,8 +8,8 @@ const {
   refreshController,
   logoutController,
   logoutAllController,
-} = require('./authController');
-const { requireAuth } = require('./authMiddleware');
+} = require('../Conntrollers/authController');
+const { requireAuth } = require('../Middlewares/authMiddleware');
 
 const router = express.Router();
 

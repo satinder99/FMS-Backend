@@ -6,7 +6,7 @@
 // the JSON body — the frontend keeps it in memory (not localStorage)
 // and attaches it as `Authorization: Bearer <token>`.
 
-const authService = require('./authService');
+const authService = require('../Auth/authService');
 
 const REFRESH_COOKIE_NAME = 'refreshToken';
 const REFRESH_COOKIE_OPTIONS = {
