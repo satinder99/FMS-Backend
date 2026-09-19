@@ -109,8 +109,21 @@ async function signUp({ orgId, username, email, phone, password }, requestMeta =
 
 // ---------------------------------------------------------------------
 // SIGN IN
+//
+// existingRefreshToken = whatever raw refresh token was already sitting
+// in this browser's cookie, if any (passed through by the controller).
+// Behavior:
+//   - If it's still valid AND belongs to the account being signed into,
+//     reuse it as-is (same session, just a fresh access token) instead
+//     of creating a new refresh_tokens row.
+//   - If it's missing, expired, revoked, or belongs to a different
+//     account, fall through to issuing a brand new session — same as
+//     before.
+// This only affects the SAME browser (the one presenting the cookie).
+// A different browser/device has no cookie to present, so it always
+// gets its own independent session, same as before.
 // ---------------------------------------------------------------------
-async function signIn({ orgId, usernameOrEmail, password }, requestMeta = {}) {
+async function signIn({ orgId, usernameOrEmail, password, existingRefreshToken }, requestMeta = {}) {
   if (!orgId || !usernameOrEmail || !password) {
     throw new AppError('orgId, usernameOrEmail, and password are required.', 400, 'MISSING_FIELDS');
   }
@@ -125,7 +138,7 @@ async function signIn({ orgId, usernameOrEmail, password }, requestMeta = {}) {
   );
 
   if (result.rows.length === 0) {
-    throw new AppError('Invalid username/email or password.', 401, 'INVALID_CREDENTIALS');
+    throw new AppError('Invalid username/email', 401, 'INVALID_CREDENTIALS');
   }
 
   const account = result.rows[0];
@@ -157,7 +170,7 @@ async function signIn({ orgId, usernameOrEmail, password }, requestMeta = {}) {
       ]
     );
 
-    throw new AppError('Invalid username/email or password.', 401, 'INVALID_CREDENTIALS');
+    throw new AppError('Invalid password.', 401, 'INVALID_CREDENTIALS');
   }
 
   const updated = await pool.query(
@@ -167,10 +180,44 @@ async function signIn({ orgId, usernameOrEmail, password }, requestMeta = {}) {
      RETURNING *`,
     [account.id, requestMeta.ipAddress || null]
   );
+  const freshAccount = updated.rows[0];
 
-  const tokens = await issueTokenPair(updated.rows[0], requestMeta);
+  // Check for an existing, still-valid session tied to THIS browser
+  // before creating a new one.
+  if (existingRefreshToken) {
+    console.log("existing user check")
+    const existingHash = hashToken(existingRefreshToken);
+    const existingSession = await pool.query(
+      `SELECT * FROM refresh_tokens
+       WHERE token_hash = $1
+         AND user_account_id = $2
+         AND revoked_at IS NULL
+         AND expires_at > now()
+       LIMIT 1`,
+      [existingHash, freshAccount.id]
+    );
 
-  return { user: toSafeUser(updated.rows[0]), ...tokens };
+    if (existingSession.rows.length > 0) {
+      // Valid previous session for this browser + this account — reuse
+      // it as-is. Just mint a fresh (short-lived) access token; don't
+      // touch the refresh_tokens row or rotate anything.
+      console.log("existing session found")
+      const accessToken = signAccessToken(freshAccount);
+      return {
+        user: toSafeUser(freshAccount),
+        accessToken,
+        refreshToken: existingRefreshToken, // unchanged — same session continues
+        reusedExistingSession: true,
+      };
+    }
+    // Falls through below if the cookie was present but expired/revoked/
+    // for a different account — treated the same as "no cookie at all".
+  }
+  console.log("new session , new token")
+  // No reusable session for this browser — issue a brand new one.
+  const tokens = await issueTokenPair(freshAccount, requestMeta);
+
+  return { user: toSafeUser(freshAccount), ...tokens };
 }
 
 // ---------------------------------------------------------------------

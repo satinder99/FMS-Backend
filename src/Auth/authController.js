@@ -26,7 +26,6 @@ function requestMetaFrom(req) {
 
 async function signUpController(req, res, next) {
   try {
-    console.log("sign up req: ",req.body)
     const { orgId, username, email, phone, password } = req.body;
     const { user, accessToken, refreshToken } = await authService.signUp(
       { orgId, username, email, phone, password },
@@ -41,13 +40,22 @@ async function signUpController(req, res, next) {
 
 async function signInController(req, res, next) {
   try {
+    console.log("req.body is : ",req.body)
+    console.log("cokkies are : ",req.cookies?.[REFRESH_COOKIE_NAME])
     const { orgId, usernameOrEmail, password } = req.body;
-    const { user, accessToken, refreshToken } = await authService.signIn(
-      { orgId, usernameOrEmail, password },
+    // Whatever refresh token is already sitting in this browser's
+    // cookie, if any — lets authService check for a reusable session
+    // instead of always minting a new one for the same browser.
+    const existingRefreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
+
+    const { user, accessToken, refreshToken, reusedExistingSession } = await authService.signIn(
+      { orgId, usernameOrEmail, password, existingRefreshToken },
       requestMetaFrom(req)
     );
+    // Re-set the cookie either way — if reused, this just refreshes its
+    // browser-side expiry; if new, this is the new session's cookie.
     res.cookie(REFRESH_COOKIE_NAME, refreshToken, REFRESH_COOKIE_OPTIONS);
-    res.status(200).json({ user, accessToken });
+    res.status(200).json({ user, accessToken, reusedExistingSession });
   } catch (err) {
     next(err);
   }
