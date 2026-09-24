@@ -1,0 +1,88 @@
+// scripts/bootstrap-admin.js
+//
+// ONE-TIME script to create the very first admin account, run by hand
+// from the command line — never exposed as an API route. This exists
+// specifically to solve the chicken-and-egg problem: /api/auth/assign
+// requires an admin to call it, but no admin can exist until someone
+// grants that role — so this script writes directly to the DB instead
+// of going through the app's normal signup+assign flow.
+//
+// Usage:
+//   node scripts/bootstrap-admin.js <firstName> <lastName> <email> <password> [orgId]
+//
+// Example:
+//   node scripts/bootstrap-admin.js Jas Dhaliwal admin@dhaliwalfleet.com "TempPass1234!" 1
+//
+// Note: this admin account is created WITHOUT a username (matches the
+// normal signup flow) — the admin can generate one themselves via
+// POST /api/auth/generate-username once they've logged in, same as
+// any other user, PROVIDED orgId was passed here (username generation
+// requires org_short_name to exist). If you omit orgId, generate the
+// username manually in the DB, or run assignOrgAndRole for this
+// account through another admin first.
+//
+// orgId is optional — omit it for a platform-level admin not tied to
+// one specific org (useful if you're the SaaS operator, not just one
+// carrier). Delete this file, or move it somewhere outside your
+// deployed app, once you've run it — no reason for it to ship to prod.
+
+const bcrypt = require('bcryptjs');
+const pool = require('../config/dbConfig');
+
+const SALT_ROUNDS = 12;
+
+async function bootstrapAdmin() {
+  const [, , firstName, lastName, email, password, orgIdArg] = process.argv;
+
+  if (!firstName || !lastName || !email || !password) {
+    console.error('Usage: node bootstrap-admin.js <firstName> <lastName> <email> <password> [orgId]');
+    process.exit(1);
+  }
+//   if (password.length < 10) {
+//     console.error('Password must be at least 10 characters.');
+//     process.exit(1);
+//   }
+
+  const orgId = orgIdArg ? parseInt(orgIdArg, 10) : null;
+
+  const roleResult = await pool.query(`SELECT id FROM roles WHERE lower(name) = 'admin' LIMIT 1`);
+  if (roleResult.rows.length === 0) {
+    console.error("No 'admin' role found — did you run create_roles_table.sql first?");
+    process.exit(1);
+  }
+  const adminRoleId = roleResult.rows[0].id;
+
+  if (orgId) {
+    const orgResult = await pool.query(`SELECT id FROM organizations WHERE id = $1`, [orgId]);
+    if (orgResult.rows.length === 0) {
+      console.error(`Organization ${orgId} not found.`);
+      process.exit(1);
+    }
+  }
+
+  const existing = await pool.query(`SELECT id FROM user_accounts WHERE lower(email) = lower($1) LIMIT 1`, [email]);
+  if (existing.rows.length > 0) {
+    console.error('That email is already in use.');
+    process.exit(1);
+  }
+
+  const passwordHash = await bcrypt.hash(password, SALT_ROUNDS);
+
+  const result = await pool.query(
+    `INSERT INTO user_accounts
+       (first_name, last_name, email, password_hash, password_updated_at, org_id, role_id, assigned_at, must_change_password)
+     VALUES ($1, $2, $3, $4, now(), $5, $6, now(), TRUE)
+     RETURNING id, first_name, last_name, email, org_id, role_id`,
+    [firstName, lastName, email, passwordHash, orgId, adminRoleId]
+  );
+
+  console.log('Admin account created (no username yet — generate one after first login):');
+  console.log(result.rows[0]);
+  console.log('\nmust_change_password is TRUE — this account should change its password on first login.');
+  process.exit(0);
+}
+
+bootstrapAdmin().catch((err) => {
+  console.error('Failed to create admin account:', err);
+  process.exit(1);
+});   

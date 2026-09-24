@@ -1,6 +1,5 @@
 // authMiddleware.js — verifies the short-lived access token on
-// protected routes. Apply this to everything except /signup, /signin,
-// /refresh.
+// protected routes, and optionally checks role.
 
 const jwt = require('jsonwebtoken');
 const { AppError } = require('../Errors/errors');
@@ -15,8 +14,10 @@ function requireAuth(req, res, next) {
 
   try {
     const payload = jwt.verify(token, process.env.JWT_ACCESS_SECRET);
-    // Attach identity for downstream handlers/authorization checks.
-    req.user = { id: payload.sub, orgId: payload.orgId, username: payload.username };
+    // role/orgId may be null here — an account that hasn't been
+    // assigned by an admin yet. Downstream handlers/requireRole are
+    // responsible for rejecting those where appropriate.
+    req.user = { id: payload.sub, orgId: payload.orgId, username: payload.username, role: payload.role };
     next();
   } catch (err) {
     if (err.name === 'TokenExpiredError') {
@@ -26,4 +27,15 @@ function requireAuth(req, res, next) {
   }
 }
 
-module.exports = { requireAuth };
+// requireRole('admin') — use AFTER requireAuth on a route. Rejects if
+// the token's role doesn't match (including an unassigned, null role).
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.user || !allowedRoles.includes(req.user.role)) {
+      return next(new AppError('You do not have permission to perform this action.', 403, 'FORBIDDEN'));
+    }
+    next();
+  };
+}
+
+module.exports = { requireAuth, requireRole };

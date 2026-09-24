@@ -1,4 +1,3 @@
-
 // authRoutes.js
 const express = require('express');
 const rateLimit = require('express-rate-limit');
@@ -8,13 +7,13 @@ const {
   refreshController,
   logoutController,
   logoutAllController,
+  assignOrgAndRoleController,
+  generateUsernameController,
 } = require('../Conntrollers/authController');
-const { requireAuth } = require('../Middlewares/authMiddleware');
+const { requireAuth, requireRole } = require('../Middlewares/authMiddleware');
 
 const router = express.Router();
 
-// Throttle sign-in/refresh attempts per IP — a second layer on top of
-// the per-account lockout in authService.js.
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
@@ -28,8 +27,13 @@ router.post('/signin', authLimiter, signInController);
 router.post('/refresh', authLimiter, refreshController);
 router.post('/logout', logoutController);
 
-// Admin-only in practice — protect this further with a role check once
-// you have role-based authorization wired up, not just requireAuth.
-router.post('/logout-all', requireAuth, logoutAllController);
+// Self-service — any logged-in user can generate THEIR OWN username,
+// once (guarded inside generateUsername itself: fails if already set
+// or if org/role haven't been assigned yet).
+router.post('/generate-username', requireAuth, generateUsernameController);
+
+// Admin-only from here down.
+router.post('/logout-all', requireAuth, requireRole('admin'), logoutAllController);
+router.post('/assign', requireAuth, requireRole('admin'), assignOrgAndRoleController);
 
 module.exports = router;
