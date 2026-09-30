@@ -6,10 +6,12 @@ const cookieParser = require('cookie-parser'); // needed to read the refresh-tok
 const authRoutes = require('./Router/authRoutes');
 const { requireAuth } = require('./Middlewares/authMiddleware');
 const errorHandler = require('./Errors/errorHandles');
+var cors = require('cors');
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
+app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
 
 app.get('/', async (req, res) => {
   try {
