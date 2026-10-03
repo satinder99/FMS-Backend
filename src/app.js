@@ -1,38 +1,35 @@
-// app-wiring-example.js — NOT a real entry point, just shows how the
-// pieces above plug into your existing Express app.
-
+// [BACKEND · Express] src/app.js
+require('dotenv').config();
 const express = require('express');
 const cookieParser = require('cookie-parser'); // needed to read the refresh-token cookie
+const cors = require('cors');
 const authRoutes = require('./Router/authRoutes');
-const { requireAuth } = require('./Middlewares/authMiddleware');
+const adminRoutes = require('./Router/adminRoutes');
+const driverRoutes = require('./Router/driverRoutes');
+const dispatcherRoutes = require('./Router/dispatcherRoutes');
 const errorHandler = require('./Errors/errorHandles');
-var cors = require('cors');
+const { AppError } = require('./Errors/errors');
 
 const app = express();
 app.use(express.json());
 app.use(cookieParser());
-app.use(cors({ origin: 'http://localhost:5173', credentials: true }));
+app.use(cors({ origin: process.env.CLIENT_ORIGIN || 'http://localhost:5173', credentials: true }));
 
-app.get('/', async (req, res) => {
-  try {
-    
-    res.json(`Home page`);
-  } catch (err) {
-    console.error(err.message);
-    res.status(500).send('Server Error');
-  }
+app.get('/', (req, res) => {
+  res.json('Home page');
 });
 
 app.use('/api/auth', authRoutes);
-// -> POST /api/auth/signup
-// -> POST /api/auth/signin
-// -> POST /api/auth/refresh
-// -> POST /api/auth/logout
-// -> POST /api/auth/logout-all   (revoke everywhere — e.g. on termination)
+// -> POST /api/auth/signup | signin | refresh | logout | logout-all | assign | generate-username
 
-// Everything else requires a valid short-lived access token:
-app.use('/api/orders', requireAuth, /* ordersRouter */ (req, res) => res.send('orders route'));
-app.use('/api/drivers', requireAuth, /* driversRouter */ (req, res) => res.send('drivers route'));
+// Business routes. Each router applies requireAuth -> loadContext -> role check itself.
+app.use('/api/admin', adminRoutes);
+app.use('/api/driver', driverRoutes);
+app.use('/api/dispatcher', dispatcherRoutes);
+
+// Unknown routes get a JSON error, not Express's default HTML page. The frontend's
+// request() calls res.json(), so an HTML 404 would show up as "Unexpected token <".
+app.use((req, res, next) => next(new AppError('Route not found.', 404, 'NOT_FOUND')));
 
 app.use(errorHandler); // must be registered LAST
 

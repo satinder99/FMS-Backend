@@ -1,3 +1,4 @@
+// [BACKEND · Express] src/Conntrollers/authController.js   (YOUR EXISTING FILE: only the 5 console.log lines that print refresh tokens were removed)
 // authController.js — thin HTTP layer. Parses req, calls the service,
 // shapes the response. All real logic stays in authService.js.
 //
@@ -40,7 +41,6 @@ async function signUpController(req, res, next) {
       { firstName, lastName, email, phone, password },
       requestMetaFrom(req)
     );
-    console.log("refresh token from signup controller : ",refreshToken);
     res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions(user.role_name));
     res.status(201).json({ user, accessToken });
   } catch (err) {
@@ -58,7 +58,6 @@ async function signInController(req, res, next) {
       { usernameOrEmail, password, existingRefreshToken },
       requestMetaFrom(req)
     );
-    console.log("refresh token from signin controller : ",refreshToken);
     res.cookie(REFRESH_COOKIE_NAME, refreshToken, refreshCookieOptions(user.role_name));
     res.status(200).json({ user, accessToken });
   } catch (err) {
@@ -73,7 +72,6 @@ async function refreshController(req, res, next) {
       { refreshToken },
       requestMetaFrom(req)
     );
-    console.log("refresh token from refresh controller : ",newRefreshToken);
     res.cookie(REFRESH_COOKIE_NAME, newRefreshToken, refreshCookieOptions(user.role_name));
     res.status(200).json({ user, accessToken });
   } catch (err) {
@@ -85,7 +83,6 @@ async function refreshController(req, res, next) {
 async function logoutController(req, res, next) {
   try {
     const refreshToken = req.cookies?.[REFRESH_COOKIE_NAME];
-    console.log("refresh token from logout controller : ",refreshToken);
     await authService.logout({ refreshToken });
     res.clearCookie(REFRESH_COOKIE_NAME, { path: '/api/auth' });
     res.status(204).send();
@@ -97,7 +94,6 @@ async function logoutController(req, res, next) {
 async function logoutAllController(req, res, next) {
   try {
     const { userAccountId } = req.body;
-    console.log("logout all for user id : ",userAccountId);
     
     await authService.logoutAll({ userAccountId });
     res.status(204).send();
