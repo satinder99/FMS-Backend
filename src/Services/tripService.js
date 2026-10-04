@@ -1,35 +1,57 @@
 // [BACKEND · Express] src/Services/tripService.js
-// src/Services/tripService.js — trip logic shared by the driver and dispatcher portals.
+// Reading trips (for all three portals) and creating them. Step actions: checkpointService.js. Step lists: checkpointTemplateService.js.
 const { AppError } = require('../Errors/errors');
 const { withTransaction } = require('../Utils/dbHelpers');
+const { DRIVER_EDIT_WINDOW_MINUTES } = require('./checkpointLogic');
+const { stepsForTrip } = require('./checkpointTemplateService');
+const { downloadNameFor } = require('./documentTypes');
+const { extensionFor } = require('../Utils/fileType');
 
-// Checkpoint order. "immigration" only exists on cross-border trips.
-const CHECKPOINT_TEMPLATE = [
-  { key: 'reached_source', label: 'Reached source' },
-  { key: 'pickup_truck', label: 'Pick up truck' },
-  { key: 'pickup_trailer', label: 'Pick up trailer' },
-  { key: 'load_trailer', label: 'Load trailer' },
-  { key: 'start_journey', label: 'Start journey' },
-  { key: 'immigration', label: 'Immigration / customs' },
-  { key: 'pod_upload', label: 'Upload POD' },
-];
-const buildCheckpoints = (crossBorder) =>
-  CHECKPOINT_TEMPLATE.filter((c) => c.key !== 'immigration' || crossBorder);
-
+// One row per trip. Each step carries its start/end time, whether it was edited, and how many seconds the
+// DRIVER still has to undo/change it (measured from the server-recorded tap time; NULL once locked).
 const TRIP_SQL = `
   SELECT t.id,
          'TRP-' || lpad(t.id::text, 6, '0') AS reference,
          t.driver_id,
          (u.first_name || ' ' || u.last_name) AS driver_name,
+         (cu.first_name || ' ' || cu.last_name) AS created_by_name,
          tr.unit_number AS truck_number,
          tl.unit_number AS trailer_number,
          t.origin, t.destination, t.cross_border, t.scheduled_pickup_at, t.status,
-         (SELECT json_agg(json_build_object('key', c.key, 'label', c.label, 'completedAt', c.completed_at)
-                          ORDER BY c.seq)
-            FROM trip_checkpoints c WHERE c.trip_id = t.id) AS checkpoints
+         (SELECT json_agg(json_build_object(
+                    'key', c.key,
+                    'label', c.label,
+                    'startedAt', c.started_at,
+                    'completedAt', c.completed_at,
+                    'timeEditCount', c.time_edit_count,
+                    'dispatcherEdited', c.dispatcher_edited_at IS NOT NULL,
+                    'freeEditUsed', c.dispatcher_free_edit_used,
+                    'driverEditableSeconds',
+                      CASE WHEN c.dispatcher_edited_at IS NULL
+                                AND COALESCE(c.complete_recorded_at, c.start_recorded_at) IS NOT NULL
+                           THEN GREATEST(0, FLOOR(EXTRACT(EPOCH FROM (
+                                  COALESCE(c.complete_recorded_at, c.start_recorded_at)
+                                  + make_interval(mins => ${DRIVER_EDIT_WINDOW_MINUTES}) - now()))))::int
+                      END
+                  ) ORDER BY c.seq)
+            FROM trip_checkpoints c WHERE c.trip_id = t.id) AS checkpoints,
+         (SELECT COALESCE(json_agg(json_build_object(
+                    'id', d.id,
+                    'docType', d.doc_type,
+                    'checkpointKey', d.checkpoint_key,
+                    'filename', d.original_filename,
+                    'contentType', d.content_type,
+                    'sizeBytes', d.size_bytes,
+                    'uploadedAt', d.uploaded_at,
+                    'uploadedByName', (du.first_name || ' ' || du.last_name)
+                  ) ORDER BY d.uploaded_at, d.id), '[]'::json)
+            FROM trip_documents d
+            LEFT JOIN user_accounts du ON du.id = d.uploaded_by
+           WHERE d.trip_id = t.id AND d.deleted_at IS NULL) AS documents
     FROM trips t
     JOIN drivers d        ON d.id = t.driver_id
     JOIN user_accounts u  ON u.id = d.user_id
+    LEFT JOIN user_accounts cu ON cu.id = t.created_by
     JOIN trucks tr        ON tr.id = t.truck_id
     JOIN trailers tl      ON tl.id = t.trailer_id
    WHERE t.org_id = $1
@@ -38,16 +60,29 @@ const TRIP_SQL = `
      AND ($3::bigint IS NULL OR t.id = $3)
      AND ($4::text[] IS NULL OR t.status = ANY($4))
      AND ($5::int IS NULL OR t.status <> 'completed' OR t.completed_at > now() - make_interval(days => $5::int))
-   ORDER BY CASE t.status WHEN 'in_progress' THEN 0 WHEN 'assigned' THEN 1 ELSE 2 END,
-            t.scheduled_pickup_at, t.id`;
+     AND ($6::bigint IS NULL OR t.created_by = $6)
+   ORDER BY (CASE WHEN $7::boolean THEN 0 ELSE CASE t.status WHEN 'in_progress' THEN 0 WHEN 'assigned' THEN 1 ELSE 2 END END),
+            (CASE WHEN $7::boolean THEN NULL ELSE t.scheduled_pickup_at END) ASC NULLS LAST,
+            (CASE WHEN $7::boolean THEN t.scheduled_pickup_at END) DESC NULLS LAST,
+            t.id
+   LIMIT $8::int`;
+
+const stepStatus = (c) => (c.completedAt ? 'completed' : c.startedAt ? 'in_progress' : 'pending');
 
 // pg returns BIGINT as strings; convert ids so the API matches the frontend types.
 function toTrip(row) {
+  // The query returns documents oldest first; number them per kind exactly as the download endpoints do.
+  const seen = {};
+  const documents = (row.documents || []).map((d) => {
+    seen[d.docType] = (seen[d.docType] || 0) + 1;
+    return { ...d, downloadName: downloadNameFor(row.id, d.docType, seen[d.docType], extensionFor(d.contentType)) };
+  });
   return {
     id: Number(row.id),
     reference: row.reference,
     driverId: Number(row.driver_id),
     driverName: row.driver_name,
+    createdByName: row.created_by_name,
     truckNumber: row.truck_number,
     trailerNumber: row.trailer_number,
     origin: row.origin,
@@ -55,13 +90,21 @@ function toTrip(row) {
     crossBorder: row.cross_border,
     scheduledPickup: row.scheduled_pickup_at.toISOString(),
     status: row.status,
-    checkpoints: row.checkpoints || [],
+    checkpoints: (row.checkpoints || []).map((c) => ({ ...c, status: stepStatus(c) })),
+    documents,
   };
 }
 
-/** `db` = pool or a transaction client. orgId is ALWAYS required. */
-async function fetchTrips(db, { orgId, driverId = null, tripId = null, statuses = null, recentDays = null }) {
-  const { rows } = await db.query(TRIP_SQL, [orgId, driverId, tripId, statuses, recentDays]);
+/**
+ * `db` = pool or a transaction client. orgId is ALWAYS required.
+ * Optional filters: driverId, tripId, statuses, recentDays (hide old completed trips), createdBy (the dispatcher
+ * who created it). recentFirst = newest pickup first (admin lists); limit = maximum rows (null = all).
+ */
+async function fetchTrips(
+  db,
+  { orgId, driverId = null, tripId = null, statuses = null, recentDays = null, createdBy = null, recentFirst = false, limit = null }
+) {
+  const { rows } = await db.query(TRIP_SQL, [orgId, driverId, tripId, statuses, recentDays, createdBy, recentFirst, limit]);
   return rows.map(toTrip);
 }
 
@@ -110,7 +153,6 @@ async function createTrip({ orgId, userId, input }) {
     const ownsTruck = truck.owner_driver_id != null && Number(truck.owner_driver_id) === driverId;
     const ownsTrailer = trailer.owner_driver_id != null && Number(trailer.owner_driver_id) === driverId;
 
-    
     // Latest rate whose effective date is on/before the pickup date (in the org's timezone).
     const rate = (
       await client.query(
@@ -144,7 +186,7 @@ async function createTrip({ orgId, userId, input }) {
     );
     const tripId = inserted.rows[0].id;
 
-    const list = buildCheckpoints(crossBorder);
+    const list = await stepsForTrip(client, orgId, crossBorder); // the organization's own steps, in its order
     await client.query(
       `INSERT INTO trip_checkpoints (org_id, trip_id, seq, key, label)
        SELECT $1, $2, s, k, l FROM unnest($3::int[], $4::text[], $5::text[]) AS x(s, k, l)`,
@@ -155,89 +197,4 @@ async function createTrip({ orgId, userId, input }) {
   });
 }
 
-/**
- * Driver completes the NEXT checkpoint on one of THEIR trips. The client never says which
- * checkpoint: the server always completes the first incomplete one, so order can't be skipped.
- */
-async function completeNextCheckpoint({ tripId, orgId, driverId, userId }) {
-  try {
-    return await withTransaction(async (client) => {
-      // Ownership is part of the WHERE clause: someone else's trip simply looks "not found".
-      const trip = (
-        await client.query(
-          `SELECT id, status FROM trips WHERE id = $1 AND org_id = $2 AND driver_id = $3 FOR UPDATE`,
-          [tripId, orgId, driverId]
-        )
-      ).rows[0];
-      if (!trip) throw new AppError('Trip not found.', 404, 'TRIP_NOT_FOUND');
-      if (['completed', 'cancelled'].includes(trip.status)) {
-        throw new AppError('This trip is already closed.', 409, 'TRIP_CLOSED');
-      }
-
-      const cp = (
-        await client.query(
-          `UPDATE trip_checkpoints
-              SET completed_at = now(), completed_by = $2
-            WHERE id = (SELECT id FROM trip_checkpoints
-                         WHERE trip_id = $1 AND completed_at IS NULL
-                         ORDER BY seq LIMIT 1)
-          RETURNING key`,
-          [tripId, userId]
-        )
-      ).rows[0];
-      if (!cp) throw new AppError('Every checkpoint is already complete.', 409, 'TRIP_CLOSED');
-
-      const left = (
-        await client.query(
-          `SELECT COUNT(*)::int AS n FROM trip_checkpoints WHERE trip_id = $1 AND completed_at IS NULL`,
-          [tripId]
-        )
-      ).rows[0].n;
-      const finished = left === 0;
-
-      // Raises a unique violation if driver/truck/trailer is already on another in-progress trip.
-      await client.query(
-        `UPDATE trips
-            SET status = $2::text,
-                started_at = COALESCE(started_at, now()),
-                completed_at = CASE WHEN $2::text = 'completed' THEN now() ELSE NULL END
-          WHERE id = $1`,
-        [tripId, finished ? 'completed' : 'in_progress']
-      );
-
-      // Hours placeholder (until ELD): the clock runs from "start journey" to "upload POD".
-      // The rate is the trip's snapshot, and only hourly pay can be priced from hours.
-      if (cp.key === 'start_journey') {
-        await client.query(
-          `INSERT INTO work_sessions (org_id, driver_id, trip_id, started_at, hourly_rate)
-           SELECT t.org_id, t.driver_id, t.id, now(), CASE WHEN t.pay_type = 'hourly' THEN t.pay_rate END
-             FROM trips t WHERE t.id = $1`,
-          [tripId]
-        );
-      }
-      if (cp.key === 'pod_upload') {
-        await client.query(
-          `UPDATE work_sessions SET ended_at = now() WHERE trip_id = $1 AND ended_at IS NULL`,
-          [tripId]
-        );
-      }
-
-      return (await fetchTrips(client, { orgId, tripId }))[0];
-    });
-  } catch (err) {
-    if (err.code === '23505') {
-      if (err.constraint === 'uq_trips_one_active_per_driver') {
-        throw new AppError('You already have a ride in progress. Finish it before starting another.', 409, 'DRIVER_BUSY');
-      }
-      if (err.constraint === 'uq_trips_one_active_per_truck') {
-        throw new AppError('That truck is on another ride that is still in progress.', 409, 'TRUCK_BUSY');
-      }
-      if (err.constraint === 'uq_trips_one_active_per_trailer') {
-        throw new AppError('That trailer is on another ride that is still in progress.', 409, 'TRAILER_BUSY');
-      }
-    }
-    throw err;
-  }
-}
-
-module.exports = { fetchTrips, createTrip, completeNextCheckpoint };
+module.exports = { fetchTrips, createTrip };

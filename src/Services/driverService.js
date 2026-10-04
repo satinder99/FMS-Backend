@@ -1,14 +1,11 @@
 // [BACKEND · Express] src/Services/driverService.js
 // src/Services/driverService.js — what a driver sees about their own trips, hours and pay.
 const pool = require('../config/dbConfig');
-const { fetchTrips, completeNextCheckpoint } = require('./tripService');
+const { fetchTrips } = require('./tripService');
 
 const DAILY_DRIVE_LIMIT_HOURS = 11; // US property-carrying driving limit; make configurable later
 
 const listTrips = ({ orgId, driverId }) => fetchTrips(pool, { orgId, driverId, recentDays: 30 });
-
-const completeNext = ({ tripId, orgId, driverId, userId }) =>
-  completeNextCheckpoint({ tripId, orgId, driverId, userId });
 
 const round2 = (n) => Math.round(Number(n) * 100) / 100;
 
@@ -61,4 +58,4 @@ async function getHours({ driverId }) {
   return out;
 }
 
-module.exports = { listTrips, completeNext, getHours };
+module.exports = { listTrips, getHours };

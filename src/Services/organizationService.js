@@ -5,12 +5,15 @@
 // and is mirrored again in the frontend's lib/orgValidation.ts. The frontend check is for
 // convenience; THIS file is the real gatekeeper. Keep the two in sync.
 //
-// Only 3 columns are NOT NULL in the table: name, slug, short_name. Everything else is optional.
+// Only 3 columns are NOT NULL in the table: name, slug, short_name. On top of that the trip STEPS
+// (checkpoints) are required: an organization cannot be created without choosing them. Everything else is optional.
 // Columns with a DB default (org_type, country, timezone, subscription_plan, status) are always
 // given an explicit value here, because passing NULL would override the default with NULL.
 
 const pool = require('../config/dbConfig');
 const { AppError } = require('../Errors/errors');
+const { withTransaction } = require('../Utils/dbHelpers');
+const { normalizeTemplate, replaceTemplate } = require('./checkpointTemplateService');
 
 const ORG_TYPES = ['carrier', 'broker', 'shipper'];
 const PLANS = ['trial', 'starter', 'pro', 'enterprise'];
@@ -226,10 +229,14 @@ function checkOrganizationInput(body) {
     else errors.fleetSize = 'Fleet size must be a whole number from 0 to 100,000.';
   }
 
+  // ===== Trip steps (REQUIRED): the checkpoints every trip of this organization will go through =====
+  const template = normalizeTemplate(b.checkpoints);
+  if (template.problems.length) errors.checkpoints = template.problems.join(' ');
+
   // Missing optional values become NULL.
   for (const k of Object.keys(v)) if (v[k] === undefined) v[k] = null;
 
-  return { errors, values: v, trialEndsOn };
+  return { errors, values: v, trialEndsOn, template: template.rows };
 }
 
 const todayIn = (timeZone) => {
@@ -271,7 +278,7 @@ async function createOrganization(body) {
       'INVALID_BODY'
     );
   }
-  const { errors, values, trialEndsOn } = checkOrganizationInput(body);
+  const { errors, values, trialEndsOn, template } = checkOrganizationInput(body);
   const problems = Object.values(errors);
   if (problems.length) throw new AppError(problems.join(' '), 400, 'VALIDATION_FAILED');
 
@@ -301,14 +308,18 @@ async function createOrganization(body) {
   }
 
   try {
-    const { rows } = await pool.query(
-      `INSERT INTO organizations (${columns.join(', ')})
-       VALUES (${placeholders.join(', ')})
-       RETURNING id, name, legal_name, slug, short_name, org_type, timezone,
-                 subscription_plan, trial_ends_at, status, created_at`,
-      params
-    );
-    return toOrganization(rows[0]);
+    // The organization and its step list are saved together, or not at all.
+    return await withTransaction(async (client) => {
+      const { rows } = await client.query(
+        `INSERT INTO organizations (${columns.join(', ')})
+         VALUES (${placeholders.join(', ')})
+         RETURNING id, name, legal_name, slug, short_name, org_type, timezone,
+                   subscription_plan, trial_ends_at, status, created_at`,
+        params
+      );
+      await replaceTemplate(client, rows[0].id, template);
+      return { ...toOrganization(rows[0]), stepCount: template.length };
+    });
   } catch (err) {
     const conflict = err.code === '23505' && UNIQUE_CONFLICTS[err.constraint];
     if (conflict) throw new AppError(conflict[1], 409, conflict[0]);

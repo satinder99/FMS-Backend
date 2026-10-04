@@ -3,6 +3,7 @@
 const pool = require('../config/dbConfig');
 const { AppError } = require('../Errors/errors');
 const { fetchTrips, createTrip } = require('./tripService');
+const { getAccessState } = require('./editRequestService');
 const { parseId, requireText, requireBoolean } = require('../Utils/validate');
 
 const fullName = (r) => `${r.first_name} ${r.last_name}`;
@@ -40,8 +41,11 @@ async function getDriverDetail({ orgId, driverId }) {
     [driverId, orgId]
   );
   if (!rows[0]) throw new AppError('Driver not found.', 404, 'DRIVER_NOT_FOUND');
-  const trips = await fetchTrips(pool, { orgId, driverId, recentDays: 30 });
-  return { driver: { id: Number(rows[0].id), name: fullName(rows[0]), phone: rows[0].phone }, trips };
+  const [trips, editAccess] = await Promise.all([
+    fetchTrips(pool, { orgId, driverId, recentDays: 30 }),
+    getAccessState(orgId), // open edit window / open request, so the screen can show the right buttons
+  ]);
+  return { driver: { id: Number(rows[0].id), name: fullName(rows[0]), phone: rows[0].phone }, trips, editAccess };
 }
 
 /** Options for the "New trip" form. */
